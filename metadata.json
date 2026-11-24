@@ -1,0 +1,6 @@
+{
+  "name": "Sector Zero",
+  "description": "Immersive 2.5D sprite-sheet FPS-RPG with destructible cover, elemental combat physics, dynamic crafting, branching narratives, faction reputation, and exportable LuaJIT + OpenGL ES 2.0 Android source.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
