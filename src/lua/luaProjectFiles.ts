@@ -52,6 +52,7 @@ extern float u_lowHp;
 extern vec3  u_elementTint;
 extern vec3  u_debuffColor;
 extern float u_debuffIntensity;
+extern float u_dashIframe;
 extern float u_time;
 
 vec4 effect(vec4 color, Image tex, vec2 tc, vec2 sc) {
@@ -62,6 +63,12 @@ vec4 effect(vec4 color, Image tex, vec2 tc, vec2 sc) {
   float dist = length(delta);
   float flash = max(0.0, 1.0 - dist * 1.65) * u_muzzleFlash;
   col.rgb += u_elementTint * flash * 0.16;
+
+  // Subtle electric-cyan perimeter rim during tactical dash i-frames
+  if (u_dashIframe > 0.005) {
+    float dashEdge = smoothstep(0.42, 0.84, dist);
+    col.rgb = mix(col.rgb, vec3(0.13, 0.83, 0.93), dashEdge * clamp(u_dashIframe, 0.0, 1.0) * 0.42);
+  }
 
   // Intensity-scaled elemental debuff perimeter vignette
   if (u_debuffIntensity > 0.005) {
@@ -653,7 +660,8 @@ end
 function Raycaster.render(state, atlas)
   local px, py, angle = state.px, state.py, state.angle
   local dirX, dirY = math.cos(angle), math.sin(angle)
-  local planeX, planeY = -dirY * 0.66, dirX * 0.66
+  local fovScale = 0.66 + (state.dashFovOffset or 0)
+  local planeX, planeY = -dirY * fovScale, dirX * fovScale
   local horizon = floor(RH * 0.5 + state.pitch * RH + state.bob)
   local grid = state.sector.grid
   local gw, gh = state.sector.w, state.sector.h
@@ -1303,6 +1311,7 @@ function Physics.createWeaponMotion()
     strafeLean = 0, moveBlend = 0, sprintBlend = 0, equipDip = 0,
     reloadTimer = 0, inspectProgress = 0, inspectBlend = 0,
     offsetX = 0, offsetY = 0, roll = 0, scaleMult = 1.0, inspectGlow = 0,
+    dashLean = 0, dashDip = 0,
   }
 end
 
@@ -1323,6 +1332,34 @@ end
 
 local function clampVal(v, mn, mx)
   if v < mn then return mn elseif v > mx then return mx else return v end
+end
+
+function Physics.triggerWeaponDash(wm, dirStrafe, dirFwd)
+  if wm.weaponState == "inspecting" then
+    wm.weaponState = "ready"
+  end
+  local lean = (math.abs(dirStrafe or 0) > 0.1) and dirStrafe or ((dirFwd or 1) >= 0 and 0.35 or -0.35)
+  wm.dashLean = clampVal(lean, -1, 1)
+  wm.dashDip = 1.0
+end
+
+function Physics.canStep(sector, nx, ny)
+  local m = 0.24
+  local pts = {
+    { nx - m, ny - m },
+    { nx + m, ny - m },
+    { nx - m, ny + m },
+    { nx + m, ny + m },
+  }
+  for _, pt in ipairs(pts) do
+    local gx, gy = math.floor(pt[1]), math.floor(pt[2])
+    if gx < 1 or gy < 1 or gx > sector.w or gy > sector.h then return false end
+    local cell = sector.grid[gy] and sector.grid[gy][gx]
+    if not cell or cell.kind == "wall" then return false end
+    if cell.kind == "cover" and (cell.coverHp or 0) > 0 then return false end
+    if (cell.kind == "door" or cell.kind == "gate") and (cell.doorOpen or 0) < 0.75 then return false end
+  end
+  return true
 end
 
 local function smoothstep(e0, e1, x)
@@ -1403,6 +1440,13 @@ function Physics.stepWeaponMotion(wm, input, dt)
   if wm.equipDip > 0 then
     wm.equipDip = math.max(0, wm.equipDip - dt * (prof.recovery * 0.34))
   end
+  if math.abs(wm.dashLean or 0) > 0.001 then
+    wm.dashLean = wm.dashLean * math.exp(-9.5 * dt)
+    if math.abs(wm.dashLean) < 0.002 then wm.dashLean = 0 end
+  end
+  if (wm.dashDip or 0) > 0 then
+    wm.dashDip = math.max(0, wm.dashDip - dt * 5.2)
+  end
 
   local idleFactor = 1 - wm.moveBlend * 0.55
   local breathX = math.cos(input.time * 0.95) * 0.95 * idleFactor
@@ -1419,16 +1463,19 @@ function Physics.stepWeaponMotion(wm, input, dt)
   local equipY = wm.equipDip * wm.equipDip * 26
   local reloadPhase = (wm.reloadTimer > 0) and math.sin(clampVal(wm.reloadTimer / 0.65, 0, 1) * math.pi) or 0
   local reloadY = reloadPhase * 18
+  local dashX = -(wm.dashLean or 0) * 12.5
+  local dashY = (wm.dashDip or 0) * 9.0
+  local dashRoll = -(wm.dashLean or 0) * 0.14 * prof.tiltScale
   local recoilX = (input.recoil or 0) * prof.recoilKickX
 
-  local combatX = breathX + fig8X + wm.swayX + strafeX + sprintX + recoilX
-  local combatY = breathY + fig8Y + wm.swayY + sprintY + equipY + reloadY
+  local combatX = breathX + fig8X + wm.swayX + strafeX + sprintX + recoilX + dashX
+  local combatY = breathY + fig8Y + wm.swayY + sprintY + equipY + reloadY + dashY
   local combatRoll = clampVal((
     -wm.strafeLean * 0.042
     + math.cos(input.bobPhase) * 0.022 * wm.moveBlend
     - (wm.swayX / 18) * 0.048
     - wm.sprintBlend * 0.055
-  ) * prof.tiltScale + (input.recoil or 0) * 0.032 + reloadPhase * 0.14, -0.16, 0.16)
+  ) * prof.tiltScale + (input.recoil or 0) * 0.032 + reloadPhase * 0.14 + dashRoll, -0.22, 0.22)
 
   if wm.inspectBlend > 0.001 then
     local ix, iy, iroll, izoom, iglow = evaluateInspectPose(input.archetype or "rifle", wm.inspectProgress)
@@ -1784,12 +1831,22 @@ local Raycaster = require("src.raycaster")
 local Physics   = require("src.physics")
 local RPG       = require("src.rpg")
 
+local DASH_STAMINA_COST = 28
+local DASH_DURATION = 0.18
+local DASH_IFRAME_DURATION = 0.24
+local DASH_COOLDOWN = 0.75
+local DASH_SPEED = 10.8
+local DOUBLE_TAP_WINDOW = 0.24
+
 local atlas, shader, fbCanvas
 local state = {
   px = 3.5, py = 10.5, angle = 0, pitch = 0, bob = 0, bobPhase = 0, lastStep = 0,
   lastRevealX = -1, lastRevealY = -1, showMap = false,
   recoil = 0, muzzleFlash = 0, damageFlash = 0, time = 0,
   hazardTick = 0, dotAcc = 0, outOfCombatTimer = 0,
+  dashTimer = 0, dashIframeTimer = 0, dashCooldown = 0,
+  dashDirX = 0, dashDirY = 0, dashFovOffset = 0,
+  lastMoveTap = {},
   weaponMotion = Physics.createWeaponMotion(),
   player = {
     hp = 100, maxHp = 100, shield = 40, maxShield = 40, stamina = 100, maxStamina = 100,
@@ -1821,6 +1878,9 @@ local DEBUFF_THEME = {
 }
 
 local function applyDamageToPlayer(rawDmg, element, silentDot)
+  if not silentDot and state.dashIframeTimer > 0 then
+    return
+  end
   if not silentDot then
     state.damageFlash = 1.0
   end
@@ -1843,11 +1903,48 @@ local function applyDamageToPlayer(rawDmg, element, silentDot)
     p.shield = p.maxShield
     p.debuffs = {}
     state.dotAcc = 0
+    state.dashTimer = 0
+    state.dashIframeTimer = 0
+    state.dashCooldown = 0
   end
 end
 
 local function inflictPlayerDebuff(element, rawDmg, duration)
+  if state.dashIframeTimer > 0 then
+    return
+  end
   Physics.applyPlayerDebuff(state.player, element, rawDmg, duration)
+end
+
+local function triggerTacticalDash(dirFwd, dirStrafe)
+  if state.dashCooldown > 0 or state.dashTimer > 0 or state.player.stamina < DASH_STAMINA_COST then
+    return
+  end
+  local fwd, strafe = dirFwd or 0, dirStrafe or 0
+  if dirFwd == nil and dirStrafe == nil then
+    if love.keyboard.isDown("w") then fwd = fwd + 1 end
+    if love.keyboard.isDown("s") then fwd = fwd - 1 end
+    if love.keyboard.isDown("q") then strafe = strafe - 1 end
+    if love.keyboard.isDown("e") then strafe = strafe + 1 end
+    if math.sqrt(fwd * fwd + strafe * strafe) < 0.1 then
+      fwd, strafe = 1, 0
+    end
+  end
+  local len = math.max(0.001, math.sqrt(fwd * fwd + strafe * strafe))
+  local nfwd, nstrafe = fwd / len, strafe / len
+  local cosA, sinA = math.cos(state.angle), math.sin(state.angle)
+
+  state.dashDirX = cosA * nfwd - sinA * nstrafe
+  state.dashDirY = sinA * nfwd + cosA * nstrafe
+  state.player.stamina = math.max(0, state.player.stamina - DASH_STAMINA_COST)
+  state.dashTimer = DASH_DURATION
+  state.dashIframeTimer = DASH_IFRAME_DURATION
+  state.dashCooldown = DASH_COOLDOWN
+
+  Physics.triggerWeaponDash(state.weaponMotion, nstrafe, nfwd)
+  local gx, gy = math.floor(state.px), math.floor(state.py)
+  local cell = state.sector.grid[gy] and state.sector.grid[gy][gx]
+  Physics.emitFootstepParticles(state.particles, state.px, state.py, state.angle, cell, true, 1)
 end
 
 local function firePlayerWeapon()
@@ -1897,7 +1994,15 @@ function love.mousepressed(_, _, btn)
   end
 end
 
-function love.keypressed(key)
+function love.touchpressed(_, tx, ty)
+  local sw, sh = love.graphics.getDimensions()
+  if tx >= sw - 96 and tx <= sw - 20 and ty >= sh - 108 and ty <= sh - 64 then
+    triggerTacticalDash()
+  end
+end
+
+function love.keypressed(key, _, isrepeat)
+  if isrepeat then return end
   if key == "tab" then
     state.showMap = not state.showMap
     if state.showMap then
@@ -1910,7 +2015,19 @@ function love.keypressed(key)
     state.weaponMotion.reloadTimer = 0.65
     state.player.activeWeapon.ammo = state.player.activeWeapon.mag
   elseif key == "space" then
-    firePlayerWeapon()
+    triggerTacticalDash()
+  elseif key == "w" or key == "s" or key == "q" or key == "e" then
+    local now = love.timer.getTime()
+    local prev = state.lastMoveTap[key] or 0
+    if (now - prev) <= DOUBLE_TAP_WINDOW then
+      state.lastMoveTap[key] = 0
+      if key == "w" then triggerTacticalDash(1, 0)
+      elseif key == "s" then triggerTacticalDash(-1, 0)
+      elseif key == "q" then triggerTacticalDash(0, -1)
+      elseif key == "e" then triggerTacticalDash(0, 1) end
+    else
+      state.lastMoveTap[key] = now
+    end
   end
 end
 
@@ -2035,12 +2152,23 @@ function love.update(dt)
     turnDelta = turnDelta + 2.2 * dt * 115
   end
 
+  state.dashTimer = math.max(0, state.dashTimer - dt)
+  state.dashIframeTimer = math.max(0, state.dashIframeTimer - dt)
+  state.dashCooldown = math.max(0, state.dashCooldown - dt)
+
+  local isDashing = state.dashTimer > 0
+  local targetFov = isDashing and 0.068 or 0
+  state.dashFovOffset = state.dashFovOffset + (targetFov - state.dashFovOffset) * (1 - math.exp(-18 * dt))
+  if not isDashing and math.abs(state.dashFovOffset) < 0.0005 then
+    state.dashFovOffset = 0
+  end
+
   local wantsMove = (math.abs(moveFwd) + math.abs(moveStrafe)) > 0.05
   local wantsSprint = love.keyboard.isDown("lshift") or love.keyboard.isDown("rshift")
-  local isSprinting = wantsMove and wantsSprint and state.player.stamina > 2
+  local isSprinting = (not isDashing) and wantsMove and wantsSprint and state.player.stamina > 2
   if isSprinting then
     state.player.stamina = math.max(0, state.player.stamina - 26 * dt)
-  else
+  elseif not isDashing then
     local shockRegenMult = 1 - shockEff * 0.45
     state.player.stamina = math.min(state.player.maxStamina, state.player.stamina + 18 * shockRegenMult * dt)
   end
@@ -2048,17 +2176,22 @@ function love.update(dt)
   local cryoSlowMult = 1 - cryoEff * 0.28
   local speed = 3.6 * (isSprinting and 1.52 or 1.0) * cryoSlowMult * dt
   local dx, dy = math.cos(state.angle), math.sin(state.angle)
+  local vx = isDashing and (state.dashDirX * DASH_SPEED * cryoSlowMult * dt) or ((dx * moveFwd - dy * moveStrafe) * speed)
+  local vy = isDashing and (state.dashDirY * DASH_SPEED * cryoSlowMult * dt) or ((dy * moveFwd + dx * moveStrafe) * speed)
   local oldX, oldY = state.px, state.py
-  state.px = state.px + (dx * moveFwd - dy * moveStrafe) * speed
-  state.py = state.py + (dy * moveFwd + dx * moveStrafe) * speed
+  if Physics.canStep(state.sector, state.px + vx, state.py) then state.px = state.px + vx end
+  if Physics.canStep(state.sector, state.px, state.py + vy) then state.py = state.py + vy end
 
   -- Android dual-stick touch input polling
   for _, id in ipairs(love.touch.getTouches()) do
     local tx, ty = love.touch.getPosition(id)
     local sw, sh = love.graphics.getDimensions()
     if tx < sw * 0.45 then
-      state.px = state.px + dx * ((sh * 0.72 - ty) / 140) * speed
-    elseif tx > sw * 0.55 then
+      local touchStep = dx * ((sh * 0.72 - ty) / 140) * speed
+      local touchStepY = dy * ((sh * 0.72 - ty) / 140) * speed
+      if Physics.canStep(state.sector, state.px + touchStep, state.py) then state.px = state.px + touchStep end
+      if Physics.canStep(state.sector, state.px, state.py + touchStepY) then state.py = state.py + touchStepY end
+    elseif tx > sw * 0.55 and not (tx >= sw - 96 and ty >= sh - 108 and ty <= sh - 64) then
       local tYaw = ((tx - sw * 0.8) / 120) * dt * 2.0
       state.angle = state.angle + tYaw
       turnDelta = turnDelta + tYaw * 115
@@ -2072,7 +2205,7 @@ function love.update(dt)
     Physics.revealFogOfWar(state.sector, state.px, state.py, 3)
   end
 
-  local isMoving = math.abs(state.px - oldX) + math.abs(state.py - oldY) > 0.001
+  local isMoving = (not isDashing) and (math.abs(state.px - oldX) + math.abs(state.py - oldY) > 0.001)
   if isMoving then
     state.bobPhase = state.bobPhase + dt * (isSprinting and 16.5 or 10.5)
     state.bob = math.sin(state.bobPhase) * (isSprinting and 4.8 or 3.2)
@@ -2123,6 +2256,7 @@ function love.draw()
   shader:send("u_elementTint", { 0.4, 0.8, 1.0 })
   shader:send("u_debuffColor", debColor)
   shader:send("u_debuffIntensity", debIntensity)
+  shader:send("u_dashIframe", math.min(1.0, state.dashIframeTimer / 0.16))
   shader:send("u_time", state.time)
 
   local sw, sh = love.graphics.getDimensions()
@@ -2132,7 +2266,7 @@ function love.draw()
   -- Active Elemental Debuff Readout anchored above Vitality bar (unboxed, intensity-scaled)
   for idx, entry in ipairs(activeDebuffs) do
     local theme = DEBUFF_THEME[entry.deb.element]
-    local rowY = sh - 44 - (idx - 1) * 18
+    local rowY = sh - 56 - (idx - 1) * 18
     local pct = math.floor(entry.eff * 100 + 0.5)
     love.graphics.setColor(theme.color[1], theme.color[2], theme.color[3], 0.95)
     love.graphics.print(string.format("%s  %d%% · %.1fs", theme.label, pct, entry.deb.timer), 20, rowY - 12)
@@ -2142,13 +2276,41 @@ function love.draw()
     love.graphics.rectangle("fill", 20, rowY + 3, 160 * entry.eff, 2)
   end
 
-  -- Minimal Diegetic Edge HUD
+  -- Minimal Diegetic Edge HUD (Vitality, Shield, Stamina & Tactical Dash)
   love.graphics.setColor(0.94, 0.27, 0.27, 0.9)
-  love.graphics.rectangle("fill", 20, sh - 26, 160 * (state.player.hp / state.player.maxHp), 3)
+  love.graphics.rectangle("fill", 20, sh - 38, 160 * (state.player.hp / state.player.maxHp), 3)
   love.graphics.setColor(0.02, 0.71, 0.83, 0.9)
-  love.graphics.rectangle("fill", 20, sh - 19, 160 * (state.player.shield / state.player.maxShield), 2)
+  love.graphics.rectangle("fill", 20, sh - 31, 160 * (state.player.shield / state.player.maxShield), 2)
   love.graphics.setColor(0.96, 0.62, 0.04, 0.85)
-  love.graphics.rectangle("fill", 20, sh - 13, 160 * (state.player.stamina / state.player.maxStamina), 1.5)
+  love.graphics.rectangle("fill", 20, sh - 25, 160 * (state.player.stamina / state.player.maxStamina), 1.5)
+
+  local isCooling = state.dashCooldown > 0.02
+  local isEvading = state.dashIframeTimer > 0
+  local hasStamina = state.player.stamina >= DASH_STAMINA_COST
+  local dashRatio = isCooling and math.max(0, math.min(1, (DASH_COOLDOWN - state.dashCooldown) / DASH_COOLDOWN)) or 1
+  local dashLabel = isEvading and "Dash  Evade" or (isCooling and string.format("Dash  %.1fs", state.dashCooldown) or (hasStamina and "Dash  Ready" or "Dash  Low Stam"))
+  love.graphics.setColor(isEvading and 0.40 or 0.78, isEvading and 0.93 or 0.84, isEvading and 1.00 or 0.92, 0.92)
+  love.graphics.print(dashLabel, 20, sh - 21)
+  love.graphics.setColor(0.12, 0.16, 0.22, 0.75)
+  love.graphics.rectangle("fill", 20, sh - 7, 160, 2)
+  if hasStamina or isCooling or isEvading then
+    love.graphics.setColor(0.13, 0.83, 0.93, isCooling and 0.75 or 0.95)
+  else
+    love.graphics.setColor(0.96, 0.62, 0.04, 0.45)
+  end
+  love.graphics.rectangle("fill", 20, sh - 7, 160 * dashRatio, 2)
+
+  -- Android touch Dash button
+  local osName = love.system and love.system.getOS and love.system.getOS() or ""
+  if osName == "Android" or osName == "iOS" or #love.touch.getTouches() > 0 then
+    love.graphics.setColor(0.02, 0.35, 0.45, (not isCooling and hasStamina) and 0.75 or 0.35)
+    love.graphics.rectangle("fill", sw - 96, sh - 108, 76, 44, 8, 8)
+    love.graphics.setColor(0.13, 0.83, 0.93, 0.9)
+    love.graphics.rectangle("line", sw - 96, sh - 108, 76, 44, 8, 8)
+    love.graphics.setColor(0.85, 0.98, 1.0, 0.95)
+    love.graphics.print(isCooling and string.format("%.1fs", state.dashCooldown) or "DASH", sw - 74, sh - 92)
+  end
+
   love.graphics.setColor(1, 1, 1, 0.9)
   love.graphics.print(state.player.activeWeapon.name .. "  " .. state.player.activeWeapon.ammo, sw - 210, sh - 28)
 

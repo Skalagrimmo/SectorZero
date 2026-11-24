@@ -80,6 +80,7 @@ interface GameHUDProps {
   onInteract: () => void;
   onCycleWeapon: () => void;
   onSprintToggle?: (active: boolean) => void;
+  onDash?: () => void;
   onRequestLock: () => void;
 }
 
@@ -100,6 +101,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   onInteract,
   onCycleWeapon,
   onSprintToggle,
+  onDash,
   onRequestLock,
 }) => {
   const activeWeapon = player.weapons[player.activeWeaponIndex];
@@ -176,6 +178,15 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           }}
         />
       )}
+      {player.dashIframeActive && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none fixed inset-0 transition-opacity duration-100"
+          style={{
+            boxShadow: 'inset 0 0 42px rgba(34, 211, 238, 0.34)',
+          }}
+        />
+      )}
       {/* Slim Top Compass Strip (Diegetic minimal edge) */}
       <div className="absolute top-14 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1">
         <div className="px-3 py-1 rounded bg-black/45 backdrop-blur-xs border border-white/8 flex items-center gap-3 text-[11px] font-mono text-slate-300">
@@ -190,7 +201,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             onClick={onRequestLock}
             className="pointer-events-auto mt-1 px-3 py-1 rounded bg-amber-500/90 hover:bg-amber-400 text-slate-950 text-[11px] font-semibold transition-colors cursor-pointer"
           >
-            Click Viewport to Lock Aim (WASD + Mouse · E Interact · R Reload · 1-3 Weapons)
+            Click Viewport to Lock Aim (WASD + Mouse · Space/2xTap Dash · E Interact · R Reload)
           </button>
         )}
       </div>
@@ -318,6 +329,67 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             />
           </div>
         </div>
+
+        {(() => {
+          const dashCd = player.dashCooldown ?? 0;
+          const dashMax = player.dashMaxCooldown ?? 0.75;
+          const isCooling = dashCd > 0.02;
+          const hasStamina = player.stamina >= 28;
+          const isEvading = Boolean(player.dashIframeActive);
+          const fillPct = isCooling
+            ? Math.max(0, Math.min(100, ((dashMax - dashCd) / Math.max(0.01, dashMax)) * 100))
+            : 100;
+          return (
+            <div className="pt-0.5">
+              <div className="flex justify-between text-[11px] font-mono tabular-nums mb-0.5">
+                <span
+                  className={
+                    isEvading
+                      ? 'text-cyan-300 font-medium'
+                      : isCooling || !hasStamina
+                      ? 'text-slate-400'
+                      : 'text-slate-300'
+                  }
+                >
+                  Dash
+                </span>
+                <span
+                  className={
+                    isEvading
+                      ? 'text-cyan-300 font-medium'
+                      : isCooling
+                      ? 'text-cyan-200/80'
+                      : hasStamina
+                      ? 'text-slate-400'
+                      : 'text-amber-400/85'
+                  }
+                >
+                  {isEvading
+                    ? 'Evade'
+                    : isCooling
+                    ? `${dashCd.toFixed(1)}s`
+                    : hasStamina
+                    ? 'Ready · Space'
+                    : 'Low Stamina'}
+                </span>
+              </div>
+              <div className="h-[2px] w-full bg-white/12 overflow-hidden">
+                <div
+                  className={`h-full transition-all duration-75 ${
+                    isEvading
+                      ? 'bg-cyan-300'
+                      : isCooling
+                      ? 'bg-cyan-400/75'
+                      : hasStamina
+                      ? 'bg-cyan-400'
+                      : 'bg-amber-400/45'
+                  }`}
+                  style={{ width: `${fillPct}%` }}
+                />
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
       {/* Slim Bottom-Right Weapon + Element + Ammo */}
@@ -394,6 +466,15 @@ export const GameHUD: React.FC<GameHUDProps> = ({
                 className="min-w-[48px] min-h-[44px] px-3 rounded-lg bg-amber-500/20 border border-amber-400/45 text-xs font-semibold text-amber-200"
               >
                 Sprint
+              </button>
+              <button
+                onPointerDown={() => onDash?.()}
+                disabled={(player.dashCooldown ?? 0) > 0.02 || player.stamina < 28}
+                className="min-w-[48px] min-h-[44px] px-3 rounded-lg bg-cyan-500/25 border border-cyan-400/55 text-xs font-semibold text-cyan-200 disabled:opacity-45 tabular-nums"
+              >
+                {(player.dashCooldown ?? 0) > 0.02
+                  ? `${(player.dashCooldown ?? 0).toFixed(1)}s`
+                  : 'Dash'}
               </button>
             </div>
 

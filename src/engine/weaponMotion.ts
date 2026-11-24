@@ -79,6 +79,8 @@ export interface WeaponMotionState {
   roll: number;
   scaleMult: number;
   inspectGlow: number;
+  dashLean: number;
+  dashDip: number;
 }
 
 export function createWeaponMotionState(): WeaponMotionState {
@@ -100,6 +102,8 @@ export function createWeaponMotionState(): WeaponMotionState {
     roll: 0,
     scaleMult: 1.0,
     inspectGlow: 0,
+    dashLean: 0,
+    dashDip: 0,
   };
 }
 
@@ -119,6 +123,19 @@ export function cancelWeaponInspect(
   if (nextState !== 'inspecting') {
     wm.weaponState = nextState;
   }
+}
+
+export function triggerWeaponDash(
+  wm: WeaponMotionState,
+  dirStrafe: number,
+  dirFwd: number
+): void {
+  if (wm.weaponState === 'inspecting') {
+    wm.weaponState = 'ready';
+  }
+  const lean = Math.abs(dirStrafe) > 0.1 ? dirStrafe : dirFwd >= 0 ? 0.35 : -0.35;
+  wm.dashLean = clamp(lean, -1, 1);
+  wm.dashDip = 1.0;
 }
 
 export interface WeaponMotionInput {
@@ -247,6 +264,13 @@ export function stepWeaponMotion(
   if (wm.equipDip > 0) {
     wm.equipDip = Math.max(0, wm.equipDip - dt * (profile.recovery * 0.34));
   }
+  if (Math.abs(wm.dashLean) > 0.001) {
+    wm.dashLean *= Math.exp(-9.5 * dt);
+    if (Math.abs(wm.dashLean) < 0.002) wm.dashLean = 0;
+  }
+  if (wm.dashDip > 0) {
+    wm.dashDip = Math.max(0, wm.dashDip - dt * 5.2);
+  }
 
   // Idle breathing (attenuates during active movement)
   const idleFactor = (1 - wm.moveBlend * 0.55) * motionScale;
@@ -259,7 +283,7 @@ export function stepWeaponMotion(
   const fig8X = Math.cos(input.bobPhase) * strideAmpX;
   const fig8Y = (1 - Math.abs(Math.sin(input.bobPhase))) * strideAmpY;
 
-  // Strafe lag, sprint lower-cant, equip rise, reload dip, and recoil horizontal kick
+  // Strafe lag, sprint lower-cant, equip rise, reload dip, dash tilt, and recoil horizontal kick
   const strafeOffsetX = -wm.strafeLean * 4.8 * profile.swayScale * motionScale;
   const sprintOffsetX = wm.sprintBlend * 4.4 * motionScale;
   const sprintOffsetY = wm.sprintBlend * profile.sprintDrop * motionScale;
@@ -267,10 +291,13 @@ export function stepWeaponMotion(
   const reloadPhase = wm.reloadTimer > 0 ? Math.sin(clamp(wm.reloadTimer / 0.65, 0, 1) * Math.PI) : 0;
   const reloadOffsetY = reloadPhase * 18;
   const reloadRoll = reloadPhase * 0.14;
+  const dashOffsetX = -wm.dashLean * 12.5 * motionScale;
+  const dashOffsetY = wm.dashDip * 9.0 * motionScale;
+  const dashRoll = -wm.dashLean * 0.14 * profile.tiltScale * motionScale;
   const recoilOffsetX = input.recoil * profile.recoilKickX;
 
-  const combatX = breathX + fig8X + wm.swayX + strafeOffsetX + sprintOffsetX + recoilOffsetX;
-  const combatY = breathY + fig8Y + wm.swayY + sprintOffsetY + equipOffsetY + reloadOffsetY;
+  const combatX = breathX + fig8X + wm.swayX + strafeOffsetX + sprintOffsetX + recoilOffsetX + dashOffsetX;
+  const combatY = breathY + fig8Y + wm.swayY + sprintOffsetY + equipOffsetY + reloadOffsetY + dashOffsetY;
 
   const combatRoll = clamp(
     (-wm.strafeLean * 0.042 +
@@ -280,9 +307,10 @@ export function stepWeaponMotion(
       profile.tiltScale *
       motionScale +
       input.recoil * 0.032 +
-      reloadRoll,
-    -0.16,
-    0.16
+      reloadRoll +
+      dashRoll,
+    -0.22,
+    0.22
   );
 
   if (wm.inspectBlend > 0.001) {

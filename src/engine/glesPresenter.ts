@@ -5,6 +5,7 @@ export interface ShaderUniforms {
   elementTint: [number, number, number];
   time: number;
   retroDither: number; // 0 = off, 1 = legacy GLES 16-bit dither feel
+  dashIframe: number;  // 0..1 active tactical dash invulnerability rim
 }
 
 const VERT_SRC = `
@@ -27,6 +28,7 @@ uniform float u_lowHp;
 uniform vec3 u_elementTint;
 uniform float u_time;
 uniform float u_retroDither;
+uniform float u_dashIframe;
 varying vec2 v_uv;
 
 void main() {
@@ -37,6 +39,12 @@ void main() {
   float dist = length(d);
   float flash = max(0.0, 1.0 - dist * 1.65) * u_muzzleFlash;
   col.rgb += u_elementTint * flash * 0.16;
+
+  // Subtle electric-cyan perimeter rim during tactical dash i-frames
+  if (u_dashIframe > 0.005) {
+    float dashEdge = smoothstep(0.42, 0.84, dist);
+    col.rgb = mix(col.rgb, vec3(0.13, 0.83, 0.93), dashEdge * clamp(u_dashIframe, 0.0, 1.0) * 0.42);
+  }
 
   // Diegetic edge vignette for damage and low HP heartbeat
   float edge = smoothstep(0.32, 0.85, dist);
@@ -143,6 +151,7 @@ export class GLESPresenter {
       elementTint: gl.getUniformLocation(prog, 'u_elementTint'),
       time: gl.getUniformLocation(prog, 'u_time'),
       retroDither: gl.getUniformLocation(prog, 'u_retroDither'),
+      dashIframe: gl.getUniformLocation(prog, 'u_dashIframe'),
     };
   }
 
@@ -170,6 +179,7 @@ export class GLESPresenter {
       gl.uniform3f(this.uniforms.elementTint, u.elementTint[0], u.elementTint[1], u.elementTint[2]);
       gl.uniform1f(this.uniforms.time, u.time);
       gl.uniform1f(this.uniforms.retroDither, u.retroDither);
+      gl.uniform1f(this.uniforms.dashIframe, u.dashIframe);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       return;
     }

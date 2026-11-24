@@ -83,6 +83,9 @@ export interface PlayerCharacter {
   activeWeaponIndex: number;
   armor: Armor;
   debuffs?: PlayerDebuff[];
+  dashCooldown?: number;
+  dashMaxCooldown?: number;
+  dashIframeActive?: boolean;
 }
 
 export type SurfaceHazard =

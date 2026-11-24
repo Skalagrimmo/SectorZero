@@ -27,6 +27,7 @@ export interface RenderState {
   weapon: Weapon;
   particles: ProjectileParticle[];
   targetEntityId: string | null;
+  fovOffset?: number;
 }
 
 interface CoverHit {
@@ -123,7 +124,7 @@ export class Raycaster25D {
 
     const dirX = Math.cos(angle);
     const dirY = Math.sin(angle);
-    const fovScale = 0.66;
+    const fovScale = 0.66 + (state.fovOffset ?? 0);
     const planeX = -dirY * fovScale;
     const planeY = dirX * fovScale;
 

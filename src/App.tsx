@@ -22,6 +22,7 @@ import {
   cancelWeaponInspect,
   createWeaponMotionState,
   stepWeaponMotion,
+  triggerWeaponDash,
   triggerWeaponInspect,
 } from './engine/weaponMotion';
 import {
@@ -85,8 +86,18 @@ function createDefaultPlayer(): PlayerCharacter {
     activeWeaponIndex: 0,
     armor: { ...o.startArmor },
     debuffs: [],
+    dashCooldown: 0,
+    dashMaxCooldown: 0.75,
+    dashIframeActive: false,
   };
 }
+
+const DASH_STAMINA_COST = 28;
+const DASH_DURATION = 0.18;
+const DASH_IFRAME_DURATION = 0.24;
+const DASH_COOLDOWN = 0.75;
+const DASH_SPEED = 10.8;
+const DOUBLE_TAP_WINDOW_MS = 240;
 
 function getElementTint(el: ElementType): [number, number, number] {
   switch (el) {
@@ -167,6 +178,13 @@ export default function App() {
     hazardTick: 0,
     debuffs: [] as PlayerDebuff[],
     dotAcc: 0,
+    dashTimer: 0,
+    dashIframeTimer: 0,
+    dashCooldown: 0,
+    dashDirX: 0,
+    dashDirY: 0,
+    dashFovOffset: 0,
+    lastMoveTap: {} as Record<string, number>,
   });
 
   const playerRef = useRef(player);
@@ -317,6 +335,11 @@ export default function App() {
     simRef.current.particles = [];
     simRef.current.debuffs = [];
     simRef.current.dotAcc = 0;
+    simRef.current.dashTimer = 0;
+    simRef.current.dashIframeTimer = 0;
+    simRef.current.dashCooldown = 0;
+    simRef.current.dashFovOffset = 0;
+    simRef.current.lastMoveTap = {};
 
     setPlayer({
       name: config.name,
@@ -344,6 +367,9 @@ export default function App() {
       activeWeaponIndex: 0,
       armor: { ...o.startArmor },
       debuffs: [],
+      dashCooldown: 0,
+      dashMaxCooldown: DASH_COOLDOWN,
+      dashIframeActive: false,
     });
 
     setActiveModal('none');
@@ -373,6 +399,9 @@ export default function App() {
 
   const applyDamageToPlayer = useCallback(
     (rawDmg: number, element?: ElementType, silentDot = false) => {
+      if (!silentDot && simRef.current.dashIframeTimer > 0) {
+        return;
+      }
       if (!silentDot) {
         simRef.current.damageFlash = 1.0;
       }
@@ -398,12 +427,17 @@ export default function App() {
           simRef.current.py = sec.spawnY;
           simRef.current.debuffs = [];
           simRef.current.dotAcc = 0;
+          simRef.current.dashTimer = 0;
+          simRef.current.dashIframeTimer = 0;
+          simRef.current.dashCooldown = 0;
           pushEvent('Trauma Emergency Stabilized at Sector Entry', 'danger');
           return {
             ...prev,
             hp: Math.floor(prev.maxHp * 0.75),
             shield: prev.maxShield,
             debuffs: [],
+            dashCooldown: 0,
+            dashIframeActive: false,
           };
         }
         return { ...prev, hp, shield };
@@ -414,6 +448,9 @@ export default function App() {
 
   const inflictPlayerDebuff = useCallback(
     (element: DebuffElement, rawDamage: number, duration: number) => {
+      if (simRef.current.dashIframeTimer > 0) {
+        return;
+      }
       const p = playerRef.current;
       const resistMult = p.armor.resistElement === element ? 0.38 : 1.0;
       const bioMult =
@@ -444,6 +481,60 @@ export default function App() {
       setPlayer((prev) => ({
         ...prev,
         debuffs: list.map((d) => ({ ...d })),
+      }));
+    },
+    []
+  );
+
+  const triggerTacticalDash = useCallback(
+    (dirFwd?: number, dirStrafe?: number) => {
+      if (activeModalRef.current !== 'none') return;
+      const sim = simRef.current;
+      if (sim.dashCooldown > 0 || sim.dashTimer > 0 || sim.stamina < DASH_STAMINA_COST) {
+        return;
+      }
+
+      let fwd = dirFwd ?? 0;
+      let strafe = dirStrafe ?? 0;
+      if (dirFwd === undefined && dirStrafe === undefined) {
+        if (sim.keys.has('KeyW') || sim.keys.has('ArrowUp')) fwd += 1;
+        if (sim.keys.has('KeyS') || sim.keys.has('ArrowDown')) fwd -= 1;
+        if (sim.keys.has('KeyD')) strafe += 1;
+        if (sim.keys.has('KeyA')) strafe -= 1;
+        fwd -= sim.moveStick.y;
+        strafe += sim.moveStick.x;
+        if (Math.hypot(fwd, strafe) < 0.1) {
+          fwd = 1;
+          strafe = 0;
+        }
+      }
+
+      const len = Math.hypot(fwd, strafe) || 1;
+      const nfwd = fwd / len;
+      const nstrafe = strafe / len;
+      const cosA = Math.cos(sim.angle);
+      const sinA = Math.sin(sim.angle);
+
+      sim.dashDirX = cosA * nfwd - sinA * nstrafe;
+      sim.dashDirY = sinA * nfwd + cosA * nstrafe;
+      sim.stamina = Math.max(0, sim.stamina - DASH_STAMINA_COST);
+      sim.dashTimer = DASH_DURATION;
+      sim.dashIframeTimer = DASH_IFRAME_DURATION;
+      sim.dashCooldown = DASH_COOLDOWN;
+
+      triggerWeaponDash(sim.weaponMotion, nstrafe, nfwd);
+      spawnParticles(sim.particles, sim.px, sim.py, 0.2, '#22D3EE', 5, 2.4);
+
+      const sec = sectorsRef.current[currentSectorIdRef.current];
+      const cell = sec?.grid[Math.floor(sim.py)]?.[Math.floor(sim.px)];
+      emitFootstepParticles(sim.particles, sim.px, sim.py, sim.angle, cell, true, 1);
+
+      setPlayer((prev) => ({
+        ...prev,
+        stamina: sim.stamina,
+        dashCooldown: DASH_COOLDOWN,
+        dashMaxCooldown: DASH_COOLDOWN,
+        dashIframeActive: true,
       }));
     },
     []
@@ -816,6 +907,11 @@ export default function App() {
         handleReload();
       } else if (code === 'KeyI' && activeModalRef.current === 'none') {
         triggerWeaponInspect(simRef.current.weaponMotion);
+      } else if (code === 'Space' && activeModalRef.current === 'none') {
+        e.preventDefault();
+        if (!e.repeat) {
+          triggerTacticalDash();
+        }
       } else if (code === 'Digit1' || code === 'Digit2' || code === 'Digit3' || code === 'Digit4') {
         const idx = parseInt(code.replace('Digit', ''), 10) - 1;
         setPlayer((prev) =>
@@ -832,6 +928,35 @@ export default function App() {
       } else if (code === 'KeyC' && activeModalRef.current !== 'creator') {
         if (document.pointerLockElement) document.exitPointerLock();
         setActiveModal((m) => (m === 'crafting' ? 'none' : 'crafting'));
+      }
+
+      if (!e.repeat && activeModalRef.current === 'none') {
+        let tapSlot: string | null = null;
+        let df = 0;
+        let ds = 0;
+        if (code === 'KeyW' || code === 'ArrowUp') {
+          tapSlot = 'fwd+';
+          df = 1;
+        } else if (code === 'KeyS' || code === 'ArrowDown') {
+          tapSlot = 'fwd-';
+          df = -1;
+        } else if (code === 'KeyA') {
+          tapSlot = 'strafe-';
+          ds = -1;
+        } else if (code === 'KeyD') {
+          tapSlot = 'strafe+';
+          ds = 1;
+        }
+        if (tapSlot) {
+          const nowMs = performance.now();
+          const prevTap = simRef.current.lastMoveTap[tapSlot] ?? 0;
+          if (nowMs - prevTap <= DOUBLE_TAP_WINDOW_MS) {
+            simRef.current.lastMoveTap[tapSlot] = 0;
+            triggerTacticalDash(df, ds);
+          } else {
+            simRef.current.lastMoveTap[tapSlot] = nowMs;
+          }
+        }
       }
     };
 
@@ -876,6 +1001,7 @@ export default function App() {
     window.addEventListener('mousedown', onMouseDown);
     window.addEventListener('mouseup', onMouseUp);
     document.addEventListener('pointerlockchange', onPointerLockChange);
+
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
@@ -884,7 +1010,7 @@ export default function App() {
       window.removeEventListener('mouseup', onMouseUp);
       document.removeEventListener('pointerlockchange', onPointerLockChange);
     };
-  }, [handleFire, handleInteract, handleReload]);
+  }, [handleFire, handleInteract, handleReload, triggerTacticalDash]);
 
   // Main 60 FPS Simulation + Raycast + GLES Shader Presentation Loop
   useEffect(() => {
@@ -974,17 +1100,31 @@ export default function App() {
           sim.dotAcc = 0;
         }
 
+        sim.dashTimer = Math.max(0, sim.dashTimer - dt);
+        sim.dashIframeTimer = Math.max(0, sim.dashIframeTimer - dt);
+        sim.dashCooldown = Math.max(0, sim.dashCooldown - dt);
+
+        const isDashing = sim.dashTimer > 0;
+        const reducedMotion =
+          typeof window !== 'undefined' &&
+          window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+        const targetFov = (isDashing ? 0.068 : 0) * (reducedMotion ? 0.25 : 1.0);
+        sim.dashFovOffset += (targetFov - sim.dashFovOffset) * (1 - Math.exp(-18 * dt));
+        if (!isDashing && Math.abs(sim.dashFovOffset) < 0.0005) {
+          sim.dashFovOffset = 0;
+        }
+
         const wantsMove = Math.abs(moveFwd) + Math.abs(moveStrafe) > 0.05;
         const wantsSprint =
           sim.keys.has('ShiftLeft') ||
           sim.keys.has('ShiftRight') ||
           sim.touchSprint;
-        const isSprinting = wantsMove && wantsSprint && sim.stamina > 2;
+        const isSprinting = !isDashing && wantsMove && wantsSprint && sim.stamina > 2;
 
         if (isSprinting) {
           const drainRate = 26 / (1 + p.attributes.neural * 0.05);
           sim.stamina = Math.max(0, sim.stamina - drainRate * dt);
-        } else {
+        } else if (!isDashing) {
           const shockRegenMult = 1 - shockEff * 0.45;
           sim.stamina = Math.min(p.maxStamina, sim.stamina + 18 * shockRegenMult * dt);
         }
@@ -993,8 +1133,12 @@ export default function App() {
         const cryoSlowMult = 1 - cryoEff * 0.28;
         const speed = 3.6 * p.armor.speedMod * sprintMult * cryoSlowMult * dt;
 
-        const vx = (cosA * moveFwd - sinA * moveStrafe) * speed;
-        const vy = (sinA * moveFwd + cosA * moveStrafe) * speed;
+        const vx = isDashing
+          ? sim.dashDirX * DASH_SPEED * cryoSlowMult * dt
+          : (cosA * moveFwd - sinA * moveStrafe) * speed;
+        const vy = isDashing
+          ? sim.dashDirY * DASH_SPEED * cryoSlowMult * dt
+          : (sinA * moveFwd + cosA * moveStrafe) * speed;
         const margin = 0.24;
 
         const canStep = (nx: number, ny: number) => {
@@ -1031,7 +1175,7 @@ export default function App() {
         }
 
         const movedDist = Math.hypot(sim.px - oldPx, sim.py - oldPy);
-        const isMoving = movedDist > 0.0008;
+        const isMoving = !isDashing && movedDist > 0.0008;
         if (isMoving) {
           sim.bobPhase += dt * (isSprinting ? 16.5 : 10.5);
           sim.bobOffset = Math.sin(sim.bobPhase) * (isSprinting ? 4.8 : 3.2);
@@ -1059,9 +1203,6 @@ export default function App() {
           cancelWeaponInspect(sim.weaponMotion, 'equipping');
         }
 
-        const reducedMotion =
-          typeof window !== 'undefined' &&
-          window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
         stepWeaponMotion(
           sim.weaponMotion,
           {
@@ -1248,6 +1389,7 @@ export default function App() {
           weapon: activeWeapon,
           particles: sim.particles,
           targetEntityId: null,
+          fovOffset: sim.dashFovOffset,
         });
 
         presenterRef.current.present(imgData, {
@@ -1257,6 +1399,7 @@ export default function App() {
           elementTint: getElementTint(activeWeapon.element),
           time: sim.time,
           retroDither: renderScale === 'native' ? 0 : 1,
+          dashIframe: Math.min(1, sim.dashIframeTimer / 0.16),
         });
       }
 
@@ -1268,11 +1411,18 @@ export default function App() {
         const staminaChanged = Math.abs(playerRef.current.stamina - sim.stamina) >= 0.8;
         const debuffsActive =
           sim.debuffs.length > 0 || (playerRef.current.debuffs?.length ?? 0) > 0;
-        if (staminaChanged || debuffsActive) {
+        const dashCdChanged =
+          Math.abs((playerRef.current.dashCooldown ?? 0) - sim.dashCooldown) >= 0.04;
+        const iframeNow = sim.dashIframeTimer > 0;
+        const iframeChanged = Boolean(playerRef.current.dashIframeActive) !== iframeNow;
+        if (staminaChanged || debuffsActive || dashCdChanged || iframeChanged) {
           setPlayer((prev) => ({
             ...prev,
             stamina: staminaChanged ? sim.stamina : prev.stamina,
             debuffs: debuffsActive ? sim.debuffs.map((d) => ({ ...d })) : prev.debuffs,
+            dashCooldown: sim.dashCooldown,
+            dashMaxCooldown: DASH_COOLDOWN,
+            dashIframeActive: iframeNow,
           }));
         }
         const inter = findInteractable();
@@ -1405,6 +1555,7 @@ export default function App() {
           onSprintToggle={(active) => {
             simRef.current.touchSprint = active;
           }}
+          onDash={() => triggerTacticalDash()}
           onRequestLock={requestLock}
         />
       )}
